@@ -1,0 +1,18 @@
+[package]
+name = "vigie"
+version = "0.1.0"
+description = "Tokio SWIM implementation"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+thiserror = "2.0.18"
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-test = "0.4.5"
+vigie-core = { path = "../vigie-core" }
+
+[dev-dependencies]
+rstest = "0.26.1"

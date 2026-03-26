@@ -1,0 +1,200 @@
+name: CI
+
+on:
+    push:
+        branches: [master]
+    pull_request:
+        branches: [master]
+    workflow_dispatch:
+    schedule:
+        - cron: "0 6 * * 0,3" # Every Sunday and Wednesday at 07:00 UTC+1 Paris
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: 1
+
+jobs:
+    fmt:
+        name: Format check
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt
+            - run: cargo fmt --all -- --check
+
+    lint:
+        name: Lint check
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy
+            - uses: Swatinem/rust-cache@v2
+            - run: cargo clippy --all-targets --all-features -- -D warnings
+
+    build:
+        name: Build (debug)
+        runs-on: ubuntu-latest
+        needs: [fmt, lint]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - run: cargo build --all-features
+
+    test:
+        name: Run Tests
+        needs: [build]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-nextest
+            - name: Discover tests
+              run: cargo nextest list --workspace
+            - name: Run tests
+              run: cargo nextest run --workspace --no-fail-fast
+
+    coverage:
+        name: Code Coverage
+        needs: [test]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: llvm-tools-preview
+            - uses: Swatinem/rust-cache@v2
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-nextest,cargo-llvm-cov
+            - name: Run code coverage
+              run: cargo llvm-cov nextest --workspace --no-fail-fast --html --output-dir coverage
+            - name: Create badge
+              run: |
+                  cargo llvm-cov report --json --summary-only > coverage/coverage.json
+                  COVERAGE=$(printf "%.2f" $(jq -r '.data[0].totals.lines.percent' coverage/coverage.json))
+                  echo "Coverage: $COVERAGE%"
+                  cat > coverage/badge.json << EOF
+                  {
+                  "schemaVersion": 1,
+                  "label": "coverage",
+                  "message": "${COVERAGE}%",
+                  "color": "$(if (( $(echo "${COVERAGE} >= 80" | bc -l) )); then echo "brightgreen"; else echo "orange"; fi)"
+                  }
+                  EOF
+            - name: Upload coverage pages artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: coverage-report
+                  path: coverage/
+
+    mutants:
+        name: Mutation tests (vigie-core)
+        needs: [test]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-mutants
+            - run: cargo mutants -p vigie-core --exclude-re vigie-core/benches --exclude-re vigie-core/src/common --exclude-re vigie-core/src/messages --exclude-re vigie-core/src/types --exclude-re vigie-core/src/publication --exclude-re vigie-core/src/subscription -j2 -vV
+              continue-on-error: true
+            - name: Generate badge
+              run: |
+                  CAUGHT=$(wc -l < mutants.out/caught.txt)
+                  MISSED=$(wc -l < mutants.out/missed.txt)
+                  TOTAL=$((CAUGHT + MISSED))
+                  PERCENT=$((CAUGHT * 100 / TOTAL))
+                  echo "{\"schemaVersion\":1,\"label\":\"mutants\",\"message\":\"${CAUGHT}/${TOTAL} (${PERCENT}%)\",\"color\":\"$([ $PERCENT -gt 80 ] && echo 'green' || echo 'orange')\"}" > mutants.out/badge.json
+            - name: Generate report
+              run: .github/scripts/gen_mutation_report.sh
+            - uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: mutants-out
+                  path: mutants.out
+
+    benchmark:
+        name: Performance Benchmarks
+        needs: [test]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - name: Install gnuplot
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y gnuplot=5.4*
+                  gnuplot --version
+            - name: Run benchmarks
+              run: cargo bench --profile=bench --bench latency
+            - name: Run profiling
+              run: cargo bench --profile=bench --bench latency -- latency/vigie* --profile-time 30
+            - name: Copy benchmark results
+              run: |
+                  mkdir -p benchmark-report
+                  cp -r target/criterion/* benchmark-report/
+            - name: Inject flamegraph links into reports
+              run: .github/scripts/inject_flamegraph_links.sh benchmark-report
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: benchmark-report
+                  path: benchmark-report/
+
+    deploy:
+        needs: [coverage, mutants, benchmark]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pages: write
+            id-token: write
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        steps:
+            - uses: actions/checkout@v4
+            - name: Fetch coverage report
+              uses: actions/download-artifact@v4
+              with:
+                  name: coverage-report
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  path: coverage/
+            - name: Fetch mutation assets
+              uses: actions/download-artifact@v4
+              with:
+                  name: mutants-out
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  path: mutants.out/
+            - name: Fetch benchmark report
+              uses: actions/download-artifact@v4
+              with:
+                  name: benchmark-report
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  path: benchmark-report/
+            - name: Prepare pages directory
+              run: |
+                  mkdir -p pages/coverage pages/mutants pages/benchmark
+                  cp -r coverage/html/* pages/coverage/
+                  cp -r coverage/badge.json pages/coverage/
+                  cp mutants.out/badge.json pages/mutants/
+                  cp mutants.out/mutation-report.html pages/mutants/
+                  cp -r benchmark-report/* pages/benchmark/
+                  cp .github/pages/index.html pages/
+            - name: Configure pages
+              uses: actions/configure-pages@v5
+            - name: Upload pages
+              uses: actions/upload-pages-artifact@v3
+              with:
+                  path: pages/
+            - id: deployment
+              uses: actions/deploy-pages@v4

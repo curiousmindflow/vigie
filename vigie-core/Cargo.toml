@@ -1,0 +1,16 @@
+[package]
+name = "vigie-core"
+version = "0.1.0"
+description = "Sans-io SWIM implementation"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+thiserror = "2.0.18"
+
+[dev-dependencies]
+proptest = "1.10.0"
+rstest = "0.26.1"

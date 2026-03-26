@@ -1,0 +1,11 @@
+[workspace]
+members = ["vigie", "vigie-core"]
+resolver = "2"
+default-members = ["vigie"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/curiousmindflow/vigie"
+keywords = ["gossip", "SWIM", "networking", "sans-io", "membership", "fault detection"]
+categories = ["network-programming", "distributed systems"]

@@ -1,0 +1,380 @@
+#!/bin/bash
+# .github/utils/generate_mutants_report.sh
+
+set -e
+
+MUTANTS_DIR="mutants.out"
+OUTPUT_FILE="mutants.out/mutation-report.html"
+
+if [ ! -d ".github" ]; then
+    echo "Error: Must be run from troc root directory"
+    exit 1
+fi
+
+if [ ! -d "$MUTANTS_DIR" ]; then
+    echo "Error: $MUTANTS_DIR directory not found"
+    exit 1
+fi
+
+echo "Generating mutation testing report..."
+
+# Count mutants
+caught_count=0
+missed_count=0
+timeout_count=0
+unviable_count=0
+
+[ -f "$MUTANTS_DIR/caught.txt" ] && caught_count=$(wc -l < "$MUTANTS_DIR/caught.txt")
+[ -f "$MUTANTS_DIR/missed.txt" ] && missed_count=$(wc -l < "$MUTANTS_DIR/missed.txt")
+[ -f "$MUTANTS_DIR/timeout.txt" ] && timeout_count=$(wc -l < "$MUTANTS_DIR/timeout.txt")
+[ -f "$MUTANTS_DIR/unviable.txt" ] && unviable_count=$(wc -l < "$MUTANTS_DIR/unviable.txt")
+
+total_count=$((caught_count + missed_count + timeout_count + unviable_count))
+
+if [ $total_count -eq 0 ]; then
+    mutation_score="0.00"
+else
+    mutation_score=$(awk "BEGIN {printf \"%.2f\", ($caught_count / $total_count) * 100}")
+fi
+
+echo "Found: $caught_count caught, $missed_count missed, $timeout_count timeout, $unviable_count unviable"
+
+# Function to convert mutant description to filename
+desc_to_filename() {
+    local desc="$1"
+    local location=$(echo "$desc" | cut -d: -f1-3)
+    local step1=$(echo "$location" | sed 's/\//__/g')
+    local step2=$(echo "$step1" | sed 's/:/_line_/')
+    local step3=$(echo "$step2" | sed 's/:/_col_/')
+    echo "$step3"
+}
+
+# Function to make a safe HTML ID
+make_id() {
+    echo "$1" | md5sum | cut -d' ' -f1
+}
+
+# Start HTML
+cat > "$OUTPUT_FILE" << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mutation Testing Report - Troc</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            margin: 40px 0 20px 0;
+            font-size: 2em;
+            border-bottom: 2px solid #ecf0f1;
+            padding-bottom: 8px;
+        }
+        h3 {
+            color: #7f8c8d;
+            margin: 30px 0 15px 0;
+            font-size: 1.5em;
+        }
+        h4 {
+            color: #95a5a6;
+            margin: 20px 0 10px 0;
+            font-size: 1.2em;
+        }
+        .summary {
+            background: #ecf0f1;
+            padding: 20px;
+            border-radius: 6px;
+            margin: 20px 0;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        .summary-item { text-align: center; }
+        .summary-item .number {
+            font-size: 2em;
+            font-weight: bold;
+            display: block;
+        }
+        .summary-item .label {
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+        .missed { color: #e74c3c; }
+        .caught { color: #27ae60; }
+        .index-list {
+            list-style: none;
+            padding: 0;
+        }
+        .index-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        .index-list a {
+            color: #3498db;
+            text-decoration: none;
+            font-family: 'Monaco', monospace;
+            font-size: 0.9em;
+        }
+        .index-list a:hover { text-decoration: underline; }
+        .mutant-entry {
+            margin: 30px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-left: 4px solid #3498db;
+            border-radius: 4px;
+        }
+        .mutant-entry.missed { border-left-color: #e74c3c; }
+        .mutant-entry.caught { border-left-color: #27ae60; }
+        .mutant-title {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-family: 'Monaco', monospace;
+        }
+        .log-content, .diff-content {
+            background: #282c34;
+            color: #abb2bf;
+            border-radius: 4px;
+            padding: 15px;
+            overflow-x: auto;
+            font-family: 'Monaco', monospace;
+            font-size: 0.85em;
+            line-height: 1.5;
+            max-height: 600px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin-bottom: 15px;
+        }
+        .diff-content {
+            background: #f8f9fa;
+            color: #333;
+            border: 1px solid #dee2e6;
+        }
+        .diff-add {
+            background: #d4edda;
+            color: #155724;
+            display: block;
+        }
+        .diff-remove {
+            background: #f8d7da;
+            color: #721c24;
+            display: block;
+        }
+        .diff-context {
+            color: #6c757d;
+            display: block;
+        }
+        .back-to-top {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #3498db;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 6px;
+            text-decoration: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .back-to-top:hover { background: #2980b9; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧬 Mutation Testing Report - Troc</h1>
+        <p style="color: #7f8c8d; margin-bottom: 20px;">Generated: 
+EOF
+
+date '+%Y-%m-%d %H:%M:%S' >> "$OUTPUT_FILE"
+
+cat >> "$OUTPUT_FILE" << EOF
+        </p>
+        
+        <div class="summary">
+            <div class="summary-item">
+                <span class="number">$total_count</span>
+                <span class="label">Total Mutants</span>
+            </div>
+            <div class="summary-item">
+                <span class="number caught">$caught_count</span>
+                <span class="label">Caught</span>
+            </div>
+            <div class="summary-item">
+                <span class="number missed">$missed_count</span>
+                <span class="label">Missed</span>
+            </div>
+            <div class="summary-item">
+                <span class="number" style="color: #f39c12;">$timeout_count</span>
+                <span class="label">Timeout</span>
+            </div>
+            <div class="summary-item">
+                <span class="number" style="color: #95a5a6;">$unviable_count</span>
+                <span class="label">Unviable</span>
+            </div>
+            <div class="summary-item">
+                <span class="number" style="color: #3498db;">${mutation_score}%</span>
+                <span class="label">Mutation Score</span>
+            </div>
+        </div>
+        
+        <h2 id="index">Index</h2>
+        
+        <h3>Missed Mutants</h3>
+        <ul class="index-list">
+EOF
+
+# Generate missed index
+if [ -f "$MUTANTS_DIR/missed.txt" ]; then
+    while IFS= read -r mutant_desc; do
+        [ -z "$mutant_desc" ] && continue
+        mutant_id=$(make_id "$mutant_desc")
+        echo "            <li><a href=\"#missed-${mutant_id}\">${mutant_desc}</a></li>" >> "$OUTPUT_FILE"
+    done < "$MUTANTS_DIR/missed.txt"
+fi
+
+cat >> "$OUTPUT_FILE" << 'EOF'
+        </ul>
+        
+        <h3>Caught Mutants</h3>
+        <ul class="index-list">
+EOF
+
+# Generate caught index
+if [ -f "$MUTANTS_DIR/caught.txt" ]; then
+    while IFS= read -r mutant_desc; do
+        [ -z "$mutant_desc" ] && continue
+        mutant_id=$(make_id "$mutant_desc")
+        echo "            <li><a href=\"#caught-${mutant_id}\">${mutant_desc}</a></li>" >> "$OUTPUT_FILE"
+    done < "$MUTANTS_DIR/caught.txt"
+fi
+
+cat >> "$OUTPUT_FILE" << 'EOF'
+        </ul>
+        
+        <h2 id="missed-section">Missed Mutants</h2>
+        <div>
+EOF
+
+# Generate missed content - DIFF ONLY
+if [ -f "$MUTANTS_DIR/missed.txt" ]; then
+    while IFS= read -r mutant_desc; do
+        [ -z "$mutant_desc" ] && continue
+        
+        mutant_id=$(make_id "$mutant_desc")
+        filename=$(desc_to_filename "$mutant_desc")
+        diff_file="$MUTANTS_DIR/diff/${filename}.diff"
+        
+        echo "            <div class=\"mutant-entry missed\" id=\"missed-${mutant_id}\">" >> "$OUTPUT_FILE"
+        echo "                <div class=\"mutant-title\">${mutant_desc}</div>" >> "$OUTPUT_FILE"
+        
+        if [ -f "$diff_file" ]; then
+            echo "                <div class=\"diff-content\">" >> "$OUTPUT_FILE"
+            while IFS= read -r line; do
+                escaped=$(echo "$line" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+                if [[ $line == +* ]] && [[ $line != +++* ]]; then
+                    echo "<span class=\"diff-add\">$escaped</span>" >> "$OUTPUT_FILE"
+                elif [[ $line == -* ]] && [[ $line != ---* ]]; then
+                    echo "<span class=\"diff-remove\">$escaped</span>" >> "$OUTPUT_FILE"
+                else
+                    echo "<span class=\"diff-context\">$escaped</span>" >> "$OUTPUT_FILE"
+                fi
+            done < "$diff_file"
+            echo "                </div>" >> "$OUTPUT_FILE"
+        else
+            echo "                <p style='color: #95a5a6;'>Diff file not found</p>" >> "$OUTPUT_FILE"
+        fi
+        
+        echo "            </div>" >> "$OUTPUT_FILE"
+    done < "$MUTANTS_DIR/missed.txt"
+fi
+
+cat >> "$OUTPUT_FILE" << 'EOF'
+        </div>
+        
+        <h2 id="caught-section">Caught Mutants</h2>
+        <div>
+EOF
+
+# Generate caught content - DIFF + TEST LOG
+if [ -f "$MUTANTS_DIR/caught.txt" ]; then
+    while IFS= read -r mutant_desc; do
+        [ -z "$mutant_desc" ] && continue
+        
+        mutant_id=$(make_id "$mutant_desc")
+        filename=$(desc_to_filename "$mutant_desc")
+        diff_file="$MUTANTS_DIR/diff/${filename}.diff"
+        log_file="$MUTANTS_DIR/log/${filename}.log"
+        
+        echo "            <div class=\"mutant-entry caught\" id=\"caught-${mutant_id}\">" >> "$OUTPUT_FILE"
+        echo "                <div class=\"mutant-title\">${mutant_desc}</div>" >> "$OUTPUT_FILE"
+        
+        # Show diff
+        echo "                <h4>Mutation Diff</h4>" >> "$OUTPUT_FILE"
+        if [ -f "$diff_file" ]; then
+            echo "                <div class=\"diff-content\">" >> "$OUTPUT_FILE"
+            while IFS= read -r line; do
+                escaped=$(echo "$line" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+                if [[ $line == +* ]] && [[ $line != +++* ]]; then
+                    echo "<span class=\"diff-add\">$escaped</span>" >> "$OUTPUT_FILE"
+                elif [[ $line == -* ]] && [[ $line != ---* ]]; then
+                    echo "<span class=\"diff-remove\">$escaped</span>" >> "$OUTPUT_FILE"
+                else
+                    echo "<span class=\"diff-context\">$escaped</span>" >> "$OUTPUT_FILE"
+                fi
+            done < "$diff_file"
+            echo "                </div>" >> "$OUTPUT_FILE"
+        else
+            echo "                <p style='color: #95a5a6;'>Diff file not found</p>" >> "$OUTPUT_FILE"
+        fi
+        
+        # Show test log (which tests failed)
+        echo "                <h4>Test Results (Failures)</h4>" >> "$OUTPUT_FILE"
+        if [ -f "$log_file" ]; then
+            echo "                <div class=\"log-content\">" >> "$OUTPUT_FILE"
+            sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$log_file" >> "$OUTPUT_FILE"
+            echo "                </div>" >> "$OUTPUT_FILE"
+        else
+            echo "                <p style='color: #95a5a6;'>Log file not found</p>" >> "$OUTPUT_FILE"
+        fi
+        
+        echo "            </div>" >> "$OUTPUT_FILE"
+    done < "$MUTANTS_DIR/caught.txt"
+fi
+
+cat >> "$OUTPUT_FILE" << 'EOF'
+        </div>
+    </div>
+    
+    <a href="#index" class="back-to-top">↑ Back to Top</a>
+</body>
+</html>
+EOF
+
+echo ""
+echo "✅ Report generated: $OUTPUT_FILE"
+echo "📊 $caught_count caught, $missed_count missed, $timeout_count timeout, $unviable_count unviable"
+echo "📈 Mutation Score: ${mutation_score}%"
