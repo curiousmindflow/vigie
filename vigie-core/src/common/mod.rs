@@ -4,6 +4,6 @@ mod member;
 mod message;
 
 pub use effects::{Effect, EffectStore};
-pub use error::Error;
-pub use member::{Member, MemberKind, MembershipEntry, MembershipEvent, MembershipEventKind};
+pub use error::VigieError;
+pub use member::{Member, MemberStatus, MembershipEntry, MembershipEvent};
 pub use message::Message;

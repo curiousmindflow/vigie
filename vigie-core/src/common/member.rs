@@ -1,11 +1,11 @@
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MembershipEntry {
     pub member: Member,
     pub incarnation_counter: u64,
-    pub kind: MembershipEventKind,
+    pub status: MemberStatus,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MembershipEvent {
     pub entry: MembershipEntry,
     pub infection_number: u64,
@@ -20,32 +20,21 @@ impl MembershipEvent {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum MembershipEventKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemberStatus {
     Alive,
     Suspect,
     Confirm,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MemberKind {
-    Ipv4,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Member {
-    kind: MemberKind,
     ip: [u8; 12],
     port: u16,
 }
 
 impl Member {
     pub fn new_ipv4(ip: [u8; 12], port: u16) -> Self {
-        Member {
-            kind: MemberKind::Ipv4,
-            ip,
-            port,
-        }
+        Member { ip, port }
     }
 }

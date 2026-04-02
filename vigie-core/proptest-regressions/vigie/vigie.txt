@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 47e981f1dfebc554b135ea9ead75912a84f19555075071a1ea763713d97dd764 # shrinks to events = [MembershipEvent { entry: MembershipEntry { member: Member { ip: [248, 25, 145, 79, 125, 202, 42, 203, 169, 61, 235, 148], port: 47863 }, incarnation_counter: 9499153574254445761, status: Confirm }, infection_number: 17040978739045705936 }, MembershipEvent { entry: MembershipEntry { member: Member { ip: [248, 25, 145, 79, 125, 202, 42, 203, 169, 61, 235, 148], port: 47863 }, incarnation_counter: 757963876274520505, status: Confirm }, infection_number: 6881678723409201719 }, MembershipEvent { entry: MembershipEntry { member: Member { ip: [248, 25, 145, 79, 125, 202, 42, 203, 169, 61, 235, 148], port: 47863 }, incarnation_counter: 9381475860078515670, status: Confirm }, infection_number: 6993215960735221435 }]

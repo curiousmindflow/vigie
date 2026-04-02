@@ -1,5 +1,7 @@
+mod builtin;
 mod common;
-mod core;
+mod vigie;
 
-pub use common::{Effect, EffectStore, Error, Member, Message};
-pub use core::{MemberStore, Vigie};
+pub use builtin::{BuiltinEffectStore, BuiltinMemberStore};
+pub use common::{Effect, EffectStore, Member, Message, VigieError};
+pub use vigie::{MemberStore, Vigie, VigieBuilder};

@@ -4,18 +4,16 @@ use crate::{Member, common::MembershipEvent};
 pub enum Message {
     Ping {
         src: Member,
-        relay: Option<Member>,
         dest: Member,
         events: Vec<MembershipEvent>,
     },
     PingRequest {
         src: Member,
-        relay: Member,
         dest: Member,
+        target: Member,
     },
     Ack {
         src: Member,
-        relay: Option<Member>,
         dest: Member,
         events: Vec<MembershipEvent>,
     },

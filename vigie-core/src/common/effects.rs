@@ -10,18 +10,16 @@ pub enum Effect {
     Ping {
         src: Member,
         dest: Member,
-        relay: Option<Member>,
         events: Vec<MembershipEvent>,
     },
     PingRequest {
         src: Member,
         dest: Member,
-        relay: Member,
+        target: Member,
     },
     Ack {
         src: Member,
         dest: Member,
-        relay: Option<Member>,
         events: Vec<MembershipEvent>,
     },
     ScheduleNextPeriod {
