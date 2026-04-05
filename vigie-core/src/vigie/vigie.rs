@@ -242,7 +242,9 @@ where
         }
 
         let Some(known) = self.member_store.get_mut(new.entry.member) else {
-            self.member_store.push(new.entry);
+            if !matches!(new.entry.status, MemberStatus::Confirm) {
+                self.member_store.push(new.entry);
+            }
             self.dissemination_buffer.insert(
                 new.entry.member,
                 MembershipEvent {
@@ -308,11 +310,6 @@ where
 mod tests {
     use proptest::prelude::*;
 
-    use rand::{
-        rngs::ThreadRng,
-        seq::{IteratorRandom, SliceRandom},
-    };
-
     use crate::{
         BuiltinEffectStore, BuiltinMemberStore, Member, Vigie, VigieBuilder,
         common::{MemberStatus, MembershipEntry, MembershipEvent},
@@ -329,16 +326,12 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_merge_received_events(events in arb_member().prop_flat_map(|m| prop::collection::vec(arb_membership_event(m), 1..20))) {
-            let mut rng = rand::rng();
-            let mut events_shuffled = events.clone();
-            events_shuffled.shuffle(&mut rng);
-
+        fn test_merge_received_events((events, shuffled) in arb_merge_received_events(3)) {
             let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
             let mut vigie_b = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
 
             vigie_a.merge_received_events(events);
-            vigie_b.merge_received_events(events_shuffled);
+            vigie_b.merge_received_events(shuffled);
 
             let mut vigie_a_members = vigie_a.get_members().to_vec();
             vigie_a_members.sort();
@@ -349,12 +342,24 @@ mod tests {
         }
     }
 
-    fn arb_member_status() -> impl Strategy<Value = MemberStatus> {
-        prop_oneof![
-            Just(MemberStatus::Alive),
-            Just(MemberStatus::Suspect),
-            Just(MemberStatus::Confirm),
-        ]
+    prop_compose! {
+        fn arb_merge_received_events(nb_elements: usize)((events, shuffled) in arb_member()
+                                                .prop_flat_map(move |m| {
+                                                    prop::collection::vec(arb_membership_event(m), 1..=nb_elements)
+                                                    .prop_flat_map(|events| {
+                                                        let len = events.len();
+                                                        let perm = prop::collection::vec(any::<proptest::sample::Index>(), len..=len);
+                                                        (Just(events), perm)
+                                                    })
+                                                    .prop_map(|(events, indices)| {
+                                                        let mut shuffled = events.clone();
+                                                        for i in 0..shuffled.len() {
+                                                            let j = indices[i].index(shuffled.len());
+                                                            shuffled.swap(i, j);
+                                                        }
+                                                        (events, shuffled)
+                                                    })
+                                                })) -> (Vec<MembershipEvent>, Vec<MembershipEvent>) { (events, shuffled) }
     }
 
     prop_compose! {
@@ -373,5 +378,13 @@ mod tests {
         fn arb_membership_event(member: Member)(entry in arb_membership_entry(member), infection_number in any::<u64>()) -> MembershipEvent {
             MembershipEvent { entry, infection_number }
         }
+    }
+
+    fn arb_member_status() -> impl Strategy<Value = MemberStatus> {
+        prop_oneof![
+            Just(MemberStatus::Alive),
+            Just(MemberStatus::Suspect),
+            Just(MemberStatus::Confirm),
+        ]
     }
 }
