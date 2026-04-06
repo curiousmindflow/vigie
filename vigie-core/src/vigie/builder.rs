@@ -98,7 +98,7 @@ where
             incarnation_counter: 0,
             status: MemberStatus::Alive,
         };
-        vigie.member_store.push(entry);
+        vigie.member_store.insert(entry);
         vigie.dissemination_buffer.insert(
             entry.member,
             MembershipEvent::new(

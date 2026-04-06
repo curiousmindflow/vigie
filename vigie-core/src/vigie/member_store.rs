@@ -6,7 +6,7 @@ pub trait MemberStore {
     fn contains(&self, member: Member) -> bool;
     fn get(&mut self, member: Member) -> Option<MembershipEntry>;
     fn get_mut(&mut self, member: Member) -> Option<&mut MembershipEntry>;
-    fn push(&mut self, member: MembershipEntry);
+    fn insert(&mut self, member: MembershipEntry);
     fn remove(&mut self, member: Member);
     fn clean(&mut self);
     fn shuffle(&mut self);
