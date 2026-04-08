@@ -17,6 +17,7 @@ where
     pub(super) member_store: M,
     pub(super) effect_store: E,
     pub(super) dissemination_buffer: HashMap<Member, MembershipEvent>,
+    // FIXME: why not a HashSet instead ?
     pub(super) pending_ping_req: HashMap<Member, Member>,
     pub(super) seeds: Vec<Member>,
     pub(super) id: Member,
@@ -396,18 +397,32 @@ mod tests {
 
     #[rstest]
     fn test_ingest_ack(
+        #[from(setup_member)] pending_ping_req_member: Member,
+        #[from(setup_member)] ack_member_await: Member,
         #[from(setup_member)] member: Member,
         #[from(setup_vigie)]
         #[with(member)]
         mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
     ) {
+        vigie
+            .pending_ping_req
+            .insert(pending_ping_req_member, pending_ping_req_member);
+        vigie.ack_member_await.replace(ack_member_await);
+
         let msg = Message::Ack {
-            src: Member::default(),
+            src: pending_ping_req_member,
             dest: member,
             events: vec![],
         };
 
         vigie.ingest(msg).unwrap();
+
+        assert!(
+            !vigie
+                .pending_ping_req
+                .contains_key(&pending_ping_req_member)
+        );
+        assert!(vigie.ack_member_await.is_none());
     }
 
     #[rstest]
@@ -507,7 +522,9 @@ mod tests {
 
     #[rstest]
     fn test_resurrection(
-        #[from(setup_member)] src: Member,
+        #[from(setup_member)]
+        #[with(1)]
+        src: Member,
         #[from(setup_member)] _member: Member,
         #[from(setup_vigie)]
         #[with(_member)]
