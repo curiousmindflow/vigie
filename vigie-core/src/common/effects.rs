@@ -5,7 +5,7 @@ pub trait EffectStore {
     fn push(&mut self, effect: Effect);
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Effect {
     Ping {
         src: Member,

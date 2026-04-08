@@ -44,27 +44,7 @@ where
                 let src_event = events.iter().find(|e| e.entry.member == src).cloned();
                 self.merge_received_events(events);
 
-                if let Some(src_member) = self.member_store.get_mut(src)
-                    && matches!(src_member.status, MemberStatus::Confirm)
-                {
-                    src_member.status = MemberStatus::Alive;
-                    if let Some(received_event) = src_event {
-                        src_member.incarnation_counter = received_event.entry.incarnation_counter;
-                        self.dissemination_buffer.insert(
-                            src,
-                            MembershipEvent {
-                                entry: MembershipEntry {
-                                    member: src,
-                                    incarnation_counter: received_event.entry.incarnation_counter,
-                                    status: MemberStatus::Alive,
-                                },
-                                infection_number: Self::compute_infection_count(
-                                    self.member_store.len(),
-                                ),
-                            },
-                        );
-                    }
-                }
+                self.resurrection(src, src_event);
 
                 let events = self.grab_events();
 
@@ -107,6 +87,28 @@ where
         }
 
         Ok(())
+    }
+
+    fn resurrection(&mut self, src: Member, src_event: Option<MembershipEvent>) {
+        if let Some(src_member) = self.member_store.get_mut(src)
+            && matches!(src_member.status, MemberStatus::Confirm)
+        {
+            src_member.status = MemberStatus::Alive;
+            if let Some(received_event) = src_event {
+                src_member.incarnation_counter = received_event.entry.incarnation_counter;
+                self.dissemination_buffer.insert(
+                    src,
+                    MembershipEvent {
+                        entry: MembershipEntry {
+                            member: src,
+                            incarnation_counter: received_event.entry.incarnation_counter,
+                            status: MemberStatus::Alive,
+                        },
+                        infection_number: Self::compute_infection_count(self.member_store.len()),
+                    },
+                );
+            }
+        }
     }
 
     pub fn start_period(&mut self, now: i64) -> Result<(), VigieError> {
@@ -257,8 +259,7 @@ where
     }
 
     fn update_event(&mut self, mut new: MembershipEvent) {
-        if matches!(new.entry.status, MemberStatus::Suspect) && new.entry.member == self.id {
-            self.defend_against_suspicion(&mut new);
+        if self.defend_against_suspicion(&mut new) {
             return;
         }
 
@@ -300,15 +301,20 @@ where
         self.dissemination_buffer.insert(new.entry.member, new);
     }
 
-    fn defend_against_suspicion(&mut self, new: &mut MembershipEvent) {
-        new.entry.incarnation_counter += 1;
-        new.entry.status = MemberStatus::Alive;
-        new.infection_number = Self::compute_infection_count(self.member_store.len());
-        self.member_store
-            .get_mut(self.id)
-            .unwrap()
-            .incarnation_counter = new.entry.incarnation_counter;
-        self.dissemination_buffer.insert(self.id, *new);
+    fn defend_against_suspicion(&mut self, new: &mut MembershipEvent) -> bool {
+        if matches!(new.entry.status, MemberStatus::Suspect) && new.entry.member == self.id {
+            new.entry.incarnation_counter += 1;
+            new.entry.status = MemberStatus::Alive;
+            new.infection_number = Self::compute_infection_count(self.member_store.len());
+            self.member_store
+                .get_mut(self.id)
+                .unwrap()
+                .incarnation_counter = new.entry.incarnation_counter;
+            self.dissemination_buffer.insert(self.id, *new);
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn seeds(&mut self) {
@@ -341,38 +347,258 @@ where
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
-    use rstest::rstest;
+    use rstest::{fixture, rstest};
 
     use crate::{
-        BuiltinEffectStore, BuiltinMemberStore, Member, Vigie, VigieBuilder,
+        BuiltinEffectStore, BuiltinMemberStore, Effect, Member, MemberStore, Message, Vigie,
+        VigieBuilder,
         common::{MemberStatus, MembershipEntry, MembershipEvent},
     };
 
-    proptest! {
-        fn test_compute_infection_count(l in 0u64..u64::MAX) {
-            let result = Vigie::<BuiltinMemberStore, BuiltinEffectStore>::compute_infection_count(l);
-            println!("{}", l);
-            prop_assert!(result >= 1);
-        }
+    #[rstest]
+    fn test_ingest_ping(
+        #[from(setup_member)] member: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::Ping {
+            src: Member::default(),
+            dest: member,
+            events: vec![],
+        };
+
+        vigie.ingest(msg).unwrap();
+
+        assert!(vigie.pop_effect().is_some())
     }
 
-    proptest! {
-        #[test]
-        fn test_merge_received_events((events, shuffled) in arb_merge_received_events(3)) {
-            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
-            let mut vigie_b = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
+    #[rstest]
+    fn test_ingest_ping_not_the_target(
+        #[from(setup_member)]
+        #[with(1)]
+        _member: Member,
+        #[from(setup_member)] dest: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::Ping {
+            src: Member::default(),
+            dest,
+            events: vec![],
+        };
 
-            vigie_a.merge_received_events(events);
-            vigie_b.merge_received_events(shuffled);
+        vigie.ingest(msg).unwrap();
 
-            let mut vigie_a_members = vigie_a.get_members().to_vec();
-            vigie_a_members.sort();
-            let mut vigie_b_members = vigie_b.get_members().to_vec();
-            vigie_b_members.sort();
+        assert!(vigie.pop_effect().is_none())
+    }
 
-            prop_assert_eq!(vigie_a_members, vigie_b_members)
-        }
+    #[rstest]
+    fn test_ingest_ack(
+        #[from(setup_member)] member: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::Ack {
+            src: Member::default(),
+            dest: member,
+            events: vec![],
+        };
+
+        vigie.ingest(msg).unwrap();
+    }
+
+    #[rstest]
+    fn test_ingest_ack_not_the_target(
+        #[from(setup_member)]
+        #[with(1)]
+        _member: Member,
+        #[from(setup_member)] dest: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::Ack {
+            src: Member::default(),
+            dest,
+            events: vec![],
+        };
+
+        vigie.ingest(msg).unwrap();
+
+        assert!(vigie.pop_effect().is_none())
+    }
+
+    #[rstest]
+    fn test_ingest_pingreq(
+        #[from(setup_member)] member: Member,
+        #[from(setup_member)] target: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::PingRequest {
+            src: Member::default(),
+            target,
+            dest: member,
+        };
+
+        vigie.member_store.insert(MembershipEntry {
+            member: target,
+            incarnation_counter: 0,
+            status: MemberStatus::Alive,
+        });
+
+        vigie.ingest(msg).unwrap();
+
+        let Some(Effect::Ping {
+            src,
+            dest,
+            events: _,
+        }) = vigie.pop_effect()
+        else {
+            panic!("Should have a Effect::Ping effect");
+        };
+
+        assert_eq!(src, member);
+        assert_eq!(dest, target);
+    }
+
+    #[rstest]
+    fn test_ingest_pingreq_not_the_target(
+        #[from(setup_member)]
+        #[with(1)]
+        dest: Member,
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::PingRequest {
+            src: Member::default(),
+            target: Member::default(),
+            dest,
+        };
+
+        vigie.ingest(msg).unwrap();
+
+        assert!(vigie.pop_effect().is_none())
+    }
+
+    #[rstest]
+    fn test_ingest_pingreq_not_have_target(
+        #[from(setup_member)] member: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let msg = Message::PingRequest {
+            src: Member::default(),
+            target: Member::default(),
+            dest: member,
+        };
+
+        vigie.ingest(msg).unwrap();
+
+        assert!(vigie.pop_effect().is_none())
+    }
+
+    #[rstest]
+    fn test_resurrection(
+        #[from(setup_member)] src: Member,
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie.member_store.insert(MembershipEntry {
+            member: src,
+            incarnation_counter: 0,
+            status: MemberStatus::Confirm,
+        });
+        let src_event = MembershipEvent {
+            entry: MembershipEntry {
+                member: src,
+                incarnation_counter: 0,
+                status: MemberStatus::Alive,
+            },
+            infection_number: 0,
+        };
+
+        vigie.resurrection(src, Some(src_event));
+
+        let Some(MembershipEvent {
+            entry:
+                MembershipEntry {
+                    member,
+                    incarnation_counter: _,
+                    status: MemberStatus::Alive,
+                },
+            infection_number: _,
+        }) = vigie.dissemination_buffer.get(&src)
+        else {
+            panic!()
+        };
+
+        assert_eq!(*member, src);
+    }
+
+    // TODO: start_period_correct_timestamp_no_ack_member_await
+    // TODO: start_period_correct_timestamp_ack_member_await
+    // TODO: start_period_inccorrect_timestamp
+    // TODO: indirect_probe_timestamp_ok
+    // TODO: indirect_probe_timestamp_nok
+    // TODO: indirect_probe_timestamp_ok_ack_member_await
+    // TODO: indirect_probe_timestamp_ok_no_ack_member_await
+    // TODO: confirm_suspicion_suspect_known
+    // TODO: confirm_suspicion_suspect_unknown
+    // TODO: select_next_member
+    // TODO: select_next_member_edge
+    // TODO: grab_events
+    // TODO: grab_events_edge
+    // TODO: defend_against_suspicion
+
+    #[rstest]
+    fn test_defend_against_suspicion(
+        #[from(setup_member)] member: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let mut event = MembershipEvent {
+            entry: MembershipEntry {
+                member,
+                incarnation_counter: 0,
+                status: MemberStatus::Suspect,
+            },
+            infection_number: 0,
+        };
+
+        let current_member_entry = vigie.member_store.get(member).unwrap();
+
+        vigie.defend_against_suspicion(&mut event);
+
+        let Some(MembershipEvent {
+            entry:
+                MembershipEntry {
+                    member: actual_member,
+                    incarnation_counter,
+                    status,
+                },
+            infection_number: _,
+        }) = vigie.dissemination_buffer.get(&member)
+        else {
+            panic!()
+        };
+
+        assert_eq!(*actual_member, member);
+        assert_eq!(*status, MemberStatus::Alive);
+        assert_eq!(
+            *incarnation_counter,
+            current_member_entry.incarnation_counter + 1
+        );
     }
 
     #[rstest]
@@ -380,7 +606,7 @@ mod tests {
         let events = vec![
             MembershipEvent {
                 entry: MembershipEntry {
-                    member: Member::new_ipv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+                    member: Member::new_ipv4([0, 0, 0, 1], 0),
                     incarnation_counter: 695773933846812385,
                     status: MemberStatus::Confirm,
                 },
@@ -388,7 +614,7 @@ mod tests {
             },
             MembershipEvent {
                 entry: MembershipEntry {
-                    member: Member::new_ipv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+                    member: Member::new_ipv4([0, 0, 0, 1], 0),
                     incarnation_counter: 7581484833041126904,
                     status: MemberStatus::Confirm,
                 },
@@ -396,7 +622,7 @@ mod tests {
             },
             MembershipEvent {
                 entry: MembershipEntry {
-                    member: Member::new_ipv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+                    member: Member::new_ipv4([0, 0, 0, 1], 0),
                     incarnation_counter: 12862825752618528021,
                     status: MemberStatus::Suspect,
                 },
@@ -407,7 +633,7 @@ mod tests {
         let shuffled = vec![
             MembershipEvent {
                 entry: MembershipEntry {
-                    member: Member::new_ipv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+                    member: Member::new_ipv4([0, 0, 0, 1], 0),
                     incarnation_counter: 7581484833041126904,
                     status: MemberStatus::Confirm,
                 },
@@ -415,7 +641,7 @@ mod tests {
             },
             MembershipEvent {
                 entry: MembershipEntry {
-                    member: Member::new_ipv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+                    member: Member::new_ipv4([0, 0, 0, 1], 0),
                     incarnation_counter: 12862825752618528021,
                     status: MemberStatus::Suspect,
                 },
@@ -423,7 +649,7 @@ mod tests {
             },
             MembershipEvent {
                 entry: MembershipEntry {
-                    member: Member::new_ipv4([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+                    member: Member::new_ipv4([0, 0, 0, 1], 0),
                     incarnation_counter: 695773933846812385,
                     status: MemberStatus::Confirm,
                 },
@@ -457,6 +683,73 @@ mod tests {
         assert_eq!(vigie_a_members, vigie_b_members)
     }
 
+    #[fixture]
+    fn setup_vigie(
+        #[default(Member::default())] member: Member,
+    ) -> Vigie<BuiltinMemberStore, BuiltinEffectStore> {
+        VigieBuilder::new(member, BuiltinMemberStore::new(), BuiltinEffectStore::new())
+            .build()
+            .unwrap()
+    }
+
+    #[fixture]
+    fn setup_member(#[default(0)] ip_offset: u8) -> Member {
+        Member::new_ipv4([0, 0, 0, ip_offset], 9000)
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+
+    use crate::{
+        BuiltinEffectStore, BuiltinMemberStore, Member, Vigie, VigieBuilder,
+        common::{MemberStatus, MembershipEntry, MembershipEvent},
+    };
+
+    proptest! {
+        #[test]
+        fn test_compute_infection_count(l in 0u64..u64::MAX) {
+            let result = Vigie::<BuiltinMemberStore, BuiltinEffectStore>::compute_infection_count(l);
+            println!("{}", l);
+            prop_assert!(result >= 1);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_merge_received_events((events, shuffled) in arb_merge_received_events(20)) {
+            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
+            let mut vigie_b = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
+
+            vigie_a.merge_received_events(events);
+            vigie_b.merge_received_events(shuffled);
+
+            let mut vigie_a_members = vigie_a.get_members().to_vec();
+            vigie_a_members.sort();
+            let mut vigie_b_members = vigie_b.get_members().to_vec();
+            vigie_b_members.sort();
+
+            prop_assert_eq!(vigie_a_members, vigie_b_members)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_update_event(events in arb_membership_events(3)) {
+            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
+
+            for event in events {
+                vigie_a.merge_received_events(vec![event]);
+                let membership_list_t0 = vigie_a.get_members().to_vec();
+                vigie_a.merge_received_events(vec![event]);
+                let membership_list_t1 = vigie_a.get_members().to_vec();
+                println!(">>>>>>>>>>>>> event: {}, membership_list_t0: {:?}, membership_list_t1: {:?}", event, &membership_list_t0, &membership_list_t1);
+                prop_assert_eq!(membership_list_t0, membership_list_t1)
+            }
+        }
+    }
+
     prop_compose! {
         fn arb_merge_received_events(nb_elements: usize)((events, shuffled) in arb_member()
                                                 .prop_flat_map(move |m| {
@@ -478,9 +771,22 @@ mod tests {
     }
 
     prop_compose! {
-        fn arb_member()(ip in prop::array::uniform12(1u8..u8::MAX), port in any::<u16>()) -> Member {
-                Member::new_ipv4(ip, port)
-            }
+        fn arb_membership_events_two_batches(nb_elements: usize)
+                                            (member in arb_member())
+                                            (
+                                                batch1 in prop::collection::vec(arb_membership_event(member), 1..=nb_elements),
+                                                batch2 in prop::collection::vec(arb_membership_event(member), 1..=nb_elements)
+                                            ) -> (Vec<MembershipEvent>, Vec<MembershipEvent>) {(batch1, batch2)}
+    }
+
+    prop_compose! {
+        fn arb_membership_events(nb_elements: usize)(events in arb_member().prop_flat_map(move |m| prop::collection::vec(arb_membership_event(m), 1..=nb_elements) ) ) -> Vec<MembershipEvent> { events }
+    }
+
+    prop_compose! {
+        fn arb_membership_event(member: Member)(entry in arb_membership_entry(member), infection_number in any::<u64>()) -> MembershipEvent {
+            MembershipEvent { entry, infection_number }
+        }
     }
 
     prop_compose! {
@@ -490,9 +796,9 @@ mod tests {
     }
 
     prop_compose! {
-        fn arb_membership_event(member: Member)(entry in arb_membership_entry(member), infection_number in any::<u64>()) -> MembershipEvent {
-            MembershipEvent { entry, infection_number }
-        }
+        fn arb_member()(ip in prop::array::uniform4(1u8..u8::MAX), port in any::<u16>()) -> Member {
+                Member::new_ipv4(ip, port)
+            }
     }
 
     fn arb_member_status() -> impl Strategy<Value = MemberStatus> {
