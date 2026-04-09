@@ -24,22 +24,20 @@ where
     M: MemberStore,
     E: EffectStore,
 {
-    pub fn new(id: Member, member_store: M, effect_store: E) -> Self {
+    pub fn new(id: Member, member_store: M, effect_store: E, seeds: &[Member]) -> Self {
+        if seeds.is_empty() {
+            panic!("Seeds should contains at least one Member")
+        }
         Self {
             id,
             member_store,
             effect_store,
-            seeds: Vec::default(),
+            seeds: seeds.to_vec(),
             k: 3,
             period: 1000,
             timeout: 500,
             suspicion_timeout: 1500,
         }
-    }
-
-    pub fn seed(mut self, seed: Member) -> Self {
-        self.seeds.push(seed);
-        self
     }
 
     pub fn k(mut self, k: u16) -> Self {

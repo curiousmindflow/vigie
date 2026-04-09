@@ -8,8 +8,7 @@ fn main() {
     let local = Member::new_ipv4([127, 0, 0, 1], 9000);
     let seed = Member::new_ipv4([127, 0, 0, 1], 9001);
 
-    let mut vigie = VigieBuilder::new(local, member_store, effect_store)
-        .seed(seed)
+    let vigie = VigieBuilder::new(local, member_store, effect_store, &[seed])
         .k(3)
         .period(1000)
         .timeout(500)

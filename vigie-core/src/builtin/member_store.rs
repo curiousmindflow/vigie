@@ -69,6 +69,7 @@ impl MemberStore for BuiltinMemberStore {
 
     fn shuffle(&mut self) {
         self.store.shuffle(&mut self.rng);
+        self.pos = 0;
     }
 
     fn get_randomly(

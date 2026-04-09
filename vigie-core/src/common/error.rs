@@ -6,4 +6,6 @@ pub enum VigieError {
     PeriodNotOver,
     #[error("The timeout is not reached yet")]
     TimeoutNotReached,
+    #[error("The Suspected member is unknown")]
+    SuspectUknown,
 }

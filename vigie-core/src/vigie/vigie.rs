@@ -191,7 +191,7 @@ where
             },
         ) = self.member_store.get(suspect)
         else {
-            return Ok(());
+            return Err(VigieError::SuspectUknown);
         };
 
         self.member_store.get_mut(suspect).unwrap().status = MemberStatus::Confirm;
@@ -348,6 +348,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use rstest::{fixture, rstest};
 
     use crate::{
@@ -562,20 +564,225 @@ mod tests {
         assert_eq!(*member, src);
     }
 
-    // TODO: start_period_correct_timestamp_no_ack_member_await
-    // TODO: start_period_correct_timestamp_ack_member_await
-    // TODO: start_period_inccorrect_timestamp
-    // TODO: indirect_probe_timestamp_ok
-    // TODO: indirect_probe_timestamp_nok
-    // TODO: indirect_probe_timestamp_ok_ack_member_await
-    // TODO: indirect_probe_timestamp_ok_no_ack_member_await
-    // TODO: confirm_suspicion_suspect_known
-    // TODO: confirm_suspicion_suspect_unknown
-    // TODO: select_next_member
-    // TODO: select_next_member_edge
-    // TODO: grab_events
-    // TODO: grab_events_edge
-    // TODO: defend_against_suspicion
+    #[rstest]
+    fn test_start_period(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie.start_period(1001).unwrap();
+
+        let Some(Effect::Ping {
+            src: _,
+            dest: _,
+            events: _,
+        }) = vigie.pop_effect()
+        else {
+            panic!()
+        };
+
+        let Some(Effect::ScheduleIndirectProbe {
+            delay: _,
+            target: _,
+        }) = vigie.pop_effect()
+        else {
+            panic!()
+        };
+
+        let Some(Effect::ScheduleNextPeriod { delay: _ }) = vigie.pop_effect() else {
+            panic!()
+        };
+    }
+
+    #[rstest]
+    fn test_start_period_ack_member_await(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let _ = vigie
+            .ack_member_await
+            .replace(Member::new_ipv4([0, 0, 0, 1], 9000));
+        vigie.start_period(vigie.period).unwrap();
+
+        let Some(Effect::Ping {
+            src: _,
+            dest: _,
+            events: _,
+        }) = vigie.pop_effect()
+        else {
+            panic!()
+        };
+
+        let Some(Effect::ScheduleSuspicionTimeout {
+            delay: _,
+            target: _,
+        }) = vigie.pop_effect()
+        else {
+            panic!()
+        };
+
+        let Some(Effect::ScheduleIndirectProbe {
+            delay: _,
+            target: _,
+        }) = vigie.pop_effect()
+        else {
+            panic!()
+        };
+
+        let Some(Effect::ScheduleNextPeriod { delay: _ }) = vigie.pop_effect() else {
+            panic!()
+        };
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn test_start_period_incorrect_timestamp(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie.start_period(vigie.period - 1).unwrap();
+    }
+
+    #[rstest]
+    fn test_indirect_probe(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let _ = vigie
+            .ack_member_await
+            .replace(Member::new_ipv4([0, 0, 0, 1], 9000));
+        vigie.indirect_probe(vigie.timeout).unwrap();
+
+        for _ in 0..vigie.k {
+            let Some(Effect::PingRequest {
+                src: _,
+                dest: _,
+                target: _,
+            }) = vigie.pop_effect()
+            else {
+                panic!()
+            };
+        }
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn test_indirect_probe_incorrect_timestamp(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie.indirect_probe(vigie.timeout - 1).unwrap();
+    }
+
+    #[rstest]
+    fn test_confirm_suspicion(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let suspect = Member::new_ipv4([0, 0, 0, 1], 9000);
+        let suspect_entry = vigie.member_store.get_mut(suspect).unwrap();
+        suspect_entry.status = MemberStatus::Suspect;
+
+        vigie.confirm_suspicion(0, suspect).unwrap();
+
+        let suspect_entry = vigie.member_store.get(suspect).unwrap();
+        assert_eq!(suspect_entry.status, MemberStatus::Confirm);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn test_confirm_suspicion_suspect_unknown(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie
+            .confirm_suspicion(0, Member::new_ipv4([0, 0, 0, 5], 9000))
+            .unwrap();
+    }
+
+    #[rstest]
+    fn test_select_next_member(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let MembershipEntry {
+            member,
+            incarnation_counter: _,
+            status: _,
+        } = vigie.select_next_member();
+
+        assert_ne!(member, _member);
+        assert_eq!(vigie.member_store.len(), 5);
+    }
+
+    #[rstest]
+    fn test_select_next_member_all_member_iterated_over(
+        #[from(setup_member)] member: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let mut member_set = HashSet::new();
+
+        for _ in 0..vigie.member_store.len() {
+            let MembershipEntry {
+                member: next_member,
+                incarnation_counter: _,
+                status: _,
+            } = vigie.select_next_member();
+
+            member_set.insert(next_member);
+        }
+
+        let MembershipEntry {
+            member: next_member,
+            incarnation_counter: _,
+            status: _,
+        } = vigie.select_next_member();
+
+        assert_ne!(next_member, member);
+        assert_eq!(vigie.member_store.len(), 5);
+        assert_eq!(member_set.len(), 4);
+    }
+
+    #[rstest]
+    fn test_select_next_member_one_left(
+        #[from(setup_member)] member: Member,
+        #[from(setup_vigie)]
+        #[with(member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie.member_store.clean();
+        vigie.member_store.insert(MembershipEntry {
+            member,
+            incarnation_counter: 0,
+            status: MemberStatus::Alive,
+        });
+
+        let MembershipEntry {
+            member: retrieved_member,
+            incarnation_counter: _,
+            status: _,
+        } = vigie.select_next_member();
+
+        assert_ne!(retrieved_member, member);
+        assert_eq!(vigie.member_store.len(), 5);
+    }
 
     #[rstest]
     fn test_defend_against_suspicion(
@@ -678,6 +885,7 @@ mod tests {
             Member::default(),
             BuiltinMemberStore::new(),
             BuiltinEffectStore::new(),
+            &[Member::new_ipv4([0, 0, 0, 1], 9000)],
         )
         .build()
         .unwrap();
@@ -685,6 +893,7 @@ mod tests {
             Member::default(),
             BuiltinMemberStore::new(),
             BuiltinEffectStore::new(),
+            &[Member::new_ipv4([0, 0, 0, 1], 9000)],
         )
         .build()
         .unwrap();
@@ -704,9 +913,19 @@ mod tests {
     fn setup_vigie(
         #[default(Member::default())] member: Member,
     ) -> Vigie<BuiltinMemberStore, BuiltinEffectStore> {
-        VigieBuilder::new(member, BuiltinMemberStore::new(), BuiltinEffectStore::new())
-            .build()
-            .unwrap()
+        VigieBuilder::new(
+            member,
+            BuiltinMemberStore::new(),
+            BuiltinEffectStore::new(),
+            &[
+                Member::new_ipv4([0, 0, 0, 1], 9000),
+                Member::new_ipv4([0, 0, 0, 2], 9000),
+                Member::new_ipv4([0, 0, 0, 3], 9000),
+                Member::new_ipv4([0, 0, 0, 4], 9000),
+            ],
+        )
+        .build()
+        .unwrap()
     }
 
     #[fixture]
@@ -735,9 +954,26 @@ mod property_tests {
 
     proptest! {
         #[test]
+        fn test_grab_events(slots in 1..20u64, events in arb_grab_events(100)) {
+            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new(), &[Member::new_ipv4([0, 0, 0, 1], 9000)]).build().unwrap();
+            for event in events {
+                vigie_a.dissemination_buffer.insert(event.entry.member, event);
+            }
+            vigie_a.event_slots = slots;
+
+            let grabbed_events = vigie_a.grab_events();
+            let are_all_infection_number_greater_than_0 = grabbed_events.iter().all(|e| e.infection_number > 0);
+
+            prop_assert!(grabbed_events.len() <= slots as usize);
+            prop_assert!(are_all_infection_number_greater_than_0);
+        }
+    }
+
+    proptest! {
+        #[test]
         fn test_merge_received_events((events, shuffled) in arb_merge_received_events(20)) {
-            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
-            let mut vigie_b = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
+            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new(), &[Member::new_ipv4([0, 0, 0, 1], 9000)]).build().unwrap();
+            let mut vigie_b = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new(), &[Member::new_ipv4([0, 0, 0, 1], 9000)]).build().unwrap();
 
             vigie_a.merge_received_events(events);
             vigie_b.merge_received_events(shuffled);
@@ -753,8 +989,8 @@ mod property_tests {
 
     proptest! {
         #[test]
-        fn test_update_event(events in arb_membership_events(3)) {
-            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new()).build().unwrap();
+        fn test_update_event(events in arb_membership_events(20)) {
+            let mut vigie_a = VigieBuilder::new(Member::default(), BuiltinMemberStore::new(), BuiltinEffectStore::new(), &[Member::new_ipv4([0, 0, 0, 1], 9000)]).build().unwrap();
 
             for event in events {
                 vigie_a.merge_received_events(vec![event]);
@@ -765,6 +1001,10 @@ mod property_tests {
                 prop_assert_eq!(membership_list_t0, membership_list_t1)
             }
         }
+    }
+
+    prop_compose! {
+        fn arb_grab_events(nb_elements: usize)(events in prop::collection::vec(arb_member().prop_flat_map(arb_membership_event), 1..=nb_elements)) -> Vec<MembershipEvent> { events }
     }
 
     prop_compose! {
