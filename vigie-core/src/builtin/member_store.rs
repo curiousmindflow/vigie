@@ -3,10 +3,7 @@ use rand::{
     seq::{IteratorRandom, SliceRandom},
 };
 
-use crate::{
-    MemberStore,
-    common::{MemberStatus, MembershipEntry},
-};
+use crate::{MemberStore, common::MembershipEntry};
 
 #[derive(Debug, Default)]
 pub struct BuiltinMemberStore {
@@ -31,16 +28,9 @@ impl MemberStore for BuiltinMemberStore {
     }
 
     fn next(&mut self) -> Option<crate::common::MembershipEntry> {
-        loop {
-            let element = self.store.get(self.pos).cloned();
-            self.pos += 1;
-            if let Some(e) = element.as_ref()
-                && matches!(e.status, MemberStatus::Confirm)
-            {
-                continue;
-            }
-            break element;
-        }
+        let element = self.store.get(self.pos).cloned();
+        self.pos += 1;
+        element
     }
 
     fn contains(&self, member: crate::Member) -> bool {
@@ -79,7 +69,7 @@ impl MemberStore for BuiltinMemberStore {
     ) -> Vec<crate::common::MembershipEntry> {
         self.store
             .iter()
-            .filter(|e| e.member != except && !matches!(e.status, MemberStatus::Confirm))
+            .filter(|e| e.member != except)
             .sample(&mut self.rng, k as usize)
             .into_iter()
             .cloned()

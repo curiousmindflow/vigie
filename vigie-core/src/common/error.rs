@@ -8,4 +8,6 @@ pub enum VigieError {
     TimeoutNotReached,
     #[error("The Suspected member is unknown")]
     SuspectUknown,
+    #[error("The suspicion timeout is not reached yet")]
+    SuspicionTimeoutNotReached,
 }

@@ -17,10 +17,11 @@ where
     pub(super) member_store: M,
     pub(super) effect_store: E,
     pub(super) dissemination_buffer: HashMap<Member, MembershipEvent>,
-    // FIXME: why not a HashSet instead ?
+    pub(super) tombstone_store: HashMap<Member, MembershipEntry>,
     pub(super) pending_ping_req: HashMap<Member, Member>,
+    pub(super) suspicion_timestamps: HashMap<Member, i64>,
     pub(super) seeds: Vec<Member>,
-    pub(super) id: Member,
+    pub(super) myself: MembershipEntry,
     pub(super) k: u16,
     pub(super) period: i64,
     pub(super) timeout: i64,
@@ -39,9 +40,13 @@ where
         self.member_store.members()
     }
 
+    pub fn get_myself(&self) -> &MembershipEntry {
+        &self.myself
+    }
+
     pub fn ingest(&mut self, message: Message) -> Result<(), VigieError> {
         match message {
-            Message::Ping { src, dest, events } if dest == self.id => {
+            Message::Ping { src, dest, events } if dest == self.myself.member => {
                 let src_event = events.iter().find(|e| e.entry.member == src).cloned();
                 self.merge_received_events(events);
 
@@ -55,13 +60,13 @@ where
                     events,
                 });
             }
-            Message::Ack { src, dest, events } if dest == self.id => {
+            Message::Ack { src, dest, events } if dest == self.myself.member => {
                 self.merge_received_events(events);
 
                 if let Some(pending) = self.pending_ping_req.remove(&src) {
                     let events = self.grab_events();
                     self.effect_store.push(Effect::Ack {
-                        src: self.id,
+                        src: self.myself.member,
                         dest: pending,
                         events,
                     });
@@ -74,12 +79,12 @@ where
                 }
             }
             Message::PingRequest { src, target, dest }
-                if dest == self.id && self.member_store.contains(target) =>
+                if dest == self.myself.member && self.member_store.contains(target) =>
             {
                 self.pending_ping_req.insert(target, src);
                 let events = self.grab_events();
                 self.effect_store.push(Effect::Ping {
-                    src: self.id,
+                    src: self.myself.member,
                     dest: target,
                     events,
                 });
@@ -91,24 +96,25 @@ where
     }
 
     fn resurrection(&mut self, src: Member, src_event: Option<MembershipEvent>) {
-        if let Some(src_member) = self.member_store.get_mut(src)
-            && matches!(src_member.status, MemberStatus::Confirm)
+        if let Some(tombstone) = self.tombstone_store.get(&src)
+            && matches!(tombstone.status, MemberStatus::Confirm)
+            && let Some(received_event) = src_event
         {
+            let mut src_member = self.tombstone_store.remove(&src).unwrap();
             src_member.status = MemberStatus::Alive;
-            if let Some(received_event) = src_event {
-                src_member.incarnation_counter = received_event.entry.incarnation_counter;
-                self.dissemination_buffer.insert(
-                    src,
-                    MembershipEvent {
-                        entry: MembershipEntry {
-                            member: src,
-                            incarnation_counter: received_event.entry.incarnation_counter,
-                            status: MemberStatus::Alive,
-                        },
-                        infection_number: Self::compute_infection_count(self.member_store.len()),
+            src_member.incarnation_counter = received_event.entry.incarnation_counter;
+            self.member_store.insert(src_member);
+            self.dissemination_buffer.insert(
+                src,
+                MembershipEvent {
+                    entry: MembershipEntry {
+                        member: src,
+                        incarnation_counter: received_event.entry.incarnation_counter,
+                        status: MemberStatus::Alive,
                     },
-                );
-            }
+                    infection_number: Self::compute_infection_count(self.member_store.len()),
+                },
+            );
         }
     }
 
@@ -122,34 +128,39 @@ where
         let events = self.grab_events();
 
         self.effect_store.push(Effect::Ping {
-            src: self.id,
+            src: self.myself.member,
             dest: dest.member,
             events,
         });
 
         if let Some(waiting) = self.ack_member_await.replace(dest.member) {
-            let waiting_member = self.member_store.get_mut(waiting).unwrap();
-            waiting_member.status = MemberStatus::Suspect;
-            match self.dissemination_buffer.entry(waiting) {
-                Entry::Occupied(mut occupied_entry) => {
-                    occupied_entry.get_mut().entry.status = MemberStatus::Suspect;
+            if self.tombstone_store.contains_key(&waiting) {
+            } else if let Some(waiting_member) = self.member_store.get_mut(waiting) {
+                waiting_member.status = MemberStatus::Suspect;
+                match self.dissemination_buffer.entry(waiting) {
+                    Entry::Occupied(mut occupied_entry) => {
+                        occupied_entry.get_mut().entry.status = MemberStatus::Suspect;
+                    }
+                    Entry::Vacant(vacant_entry) => {
+                        vacant_entry.insert(MembershipEvent {
+                            entry: MembershipEntry {
+                                member: waiting,
+                                incarnation_counter: waiting_member.incarnation_counter,
+                                status: MemberStatus::Suspect,
+                            },
+                            infection_number: Self::compute_infection_count(
+                                self.member_store.len(),
+                            ),
+                        });
+                    }
                 }
-                Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(MembershipEvent {
-                        entry: MembershipEntry {
-                            member: waiting,
-                            incarnation_counter: waiting_member.incarnation_counter,
-                            status: MemberStatus::Suspect,
-                        },
-                        infection_number: Self::compute_infection_count(self.member_store.len()),
-                    });
-                }
+                self.suspicion_timestamps.insert(waiting, now);
+                self.effect_store.push(Effect::ScheduleSuspicionTimeout {
+                    delay: self.suspicion_timeout,
+                    target: waiting,
+                });
+                // TODO: add an Effect saying a member is Suspected
             }
-            self.effect_store.push(Effect::ScheduleSuspicionTimeout {
-                delay: self.suspicion_timeout,
-                target: waiting,
-            });
-            // TODO: add an Effect saying a member is Suspected
         }
 
         self.effect_store.push(Effect::ScheduleIndirectProbe {
@@ -174,7 +185,7 @@ where
 
         for member in self.member_store.get_randomly(self.k, awaiting_member) {
             self.effect_store.push(Effect::PingRequest {
-                src: self.id,
+                src: self.myself.member,
                 target: member.member,
                 dest: awaiting_member,
             });
@@ -184,8 +195,17 @@ where
     }
 
     pub fn confirm_suspicion(&mut self, now: i64, suspect: Member) -> Result<(), VigieError> {
+        let suspected_at = self
+            .suspicion_timestamps
+            .get(&suspect)
+            .copied()
+            .unwrap_or(0);
+        if suspected_at + self.suspicion_timeout > now {
+            return Err(VigieError::SuspicionTimeoutNotReached);
+        }
+
         let Some(
-            entry @ MembershipEntry {
+            mut entry @ MembershipEntry {
                 status: MemberStatus::Suspect,
                 ..
             },
@@ -194,7 +214,10 @@ where
             return Err(VigieError::SuspectUknown);
         };
 
-        self.member_store.get_mut(suspect).unwrap().status = MemberStatus::Confirm;
+        self.member_store.remove(suspect);
+        self.suspicion_timestamps.remove(&suspect);
+        entry.status = MemberStatus::Confirm;
+        self.tombstone_store.insert(suspect, entry);
 
         let event = MembershipEvent {
             entry: MembershipEntry {
@@ -212,16 +235,12 @@ where
     }
 
     fn select_next_member(&mut self) -> MembershipEntry {
-        if self.member_store.len() <= 1 {
+        if self.member_store.len() == 0 {
             self.seeds();
         }
         loop {
-            if let Some(dest @ MembershipEntry { member, .. }) = self.member_store.next() {
-                if member == self.id {
-                    continue;
-                } else {
-                    break dest;
-                }
+            if let Some(dest) = self.member_store.next() {
+                break dest;
             }
             self.member_store.shuffle();
         }
@@ -264,6 +283,23 @@ where
             return;
         }
 
+        if let Some(tombstone) = self.tombstone_store.get_mut(&new.entry.member) {
+            if matches!(new.entry.status, MemberStatus::Confirm) {
+                tombstone.incarnation_counter = tombstone
+                    .incarnation_counter
+                    .max(new.entry.incarnation_counter);
+            }
+            return;
+        }
+
+        if matches!(new.entry.status, MemberStatus::Confirm) {
+            self.member_store.remove(new.entry.member);
+            self.tombstone_store.insert(new.entry.member, new.entry);
+            new.infection_number = Self::compute_infection_count(self.member_store.len());
+            self.dissemination_buffer.insert(new.entry.member, new);
+            return;
+        }
+
         let Some(known) = self.member_store.get_mut(new.entry.member) else {
             self.member_store.insert(new.entry);
             self.dissemination_buffer.insert(
@@ -280,16 +316,6 @@ where
             (new.entry.status, new.entry.incarnation_counter),
             (known.status, known.incarnation_counter),
         ) {
-            ((MemberStatus::Confirm, inc_new), (MemberStatus::Confirm, inc_known)) => {
-                known.incarnation_counter = inc_new.max(inc_known);
-                return;
-            }
-            ((MemberStatus::Confirm, _), _) => {
-                *known = new.entry;
-                new.infection_number = Self::compute_infection_count(self.member_store.len());
-                self.dissemination_buffer.insert(new.entry.member, new);
-                return;
-            }
             ((MemberStatus::Suspect, i), (MemberStatus::Suspect, j)) if i > j => (),
             ((MemberStatus::Suspect, i), (MemberStatus::Alive, j)) if i >= j => (),
             ((MemberStatus::Alive, i), (MemberStatus::Suspect, j)) if i > j => (),
@@ -303,15 +329,14 @@ where
     }
 
     fn defend_against_suspicion(&mut self, new: &mut MembershipEvent) -> bool {
-        if matches!(new.entry.status, MemberStatus::Suspect) && new.entry.member == self.id {
+        if matches!(new.entry.status, MemberStatus::Suspect)
+            && new.entry.member == self.myself.member
+        {
             new.entry.incarnation_counter += 1;
             new.entry.status = MemberStatus::Alive;
             new.infection_number = Self::compute_infection_count(self.member_store.len());
-            self.member_store
-                .get_mut(self.id)
-                .unwrap()
-                .incarnation_counter = new.entry.incarnation_counter;
-            self.dissemination_buffer.insert(self.id, *new);
+            self.myself.incarnation_counter = new.entry.incarnation_counter;
+            self.dissemination_buffer.insert(self.myself.member, *new);
             true
         } else {
             false
@@ -320,6 +345,9 @@ where
 
     pub(super) fn seeds(&mut self) {
         for seed in &self.seeds {
+            if self.member_store.contains(*seed) || self.tombstone_store.contains_key(seed) {
+                continue;
+            }
             let entry = MembershipEntry {
                 member: *seed,
                 incarnation_counter: 0,
@@ -532,11 +560,14 @@ mod tests {
         #[with(_member)]
         mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
     ) {
-        vigie.member_store.insert(MembershipEntry {
-            member: src,
-            incarnation_counter: 0,
-            status: MemberStatus::Confirm,
-        });
+        vigie.tombstone_store.insert(
+            src,
+            MembershipEntry {
+                member: src,
+                incarnation_counter: 0,
+                status: MemberStatus::Confirm,
+            },
+        );
         let src_event = MembershipEvent {
             entry: MembershipEntry {
                 member: src,
@@ -562,6 +593,31 @@ mod tests {
         };
 
         assert_eq!(*member, src);
+    }
+
+    #[rstest]
+    fn test_resurrection_no_src_event_preserves_tombstone(
+        #[from(setup_member)]
+        #[with(5)]
+        src: Member,
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        vigie.tombstone_store.insert(
+            src,
+            MembershipEntry {
+                member: src,
+                incarnation_counter: 0,
+                status: MemberStatus::Confirm,
+            },
+        );
+
+        vigie.resurrection(src, None);
+
+        assert!(vigie.tombstone_store.contains_key(&src));
+        assert!(!vigie.member_store.contains(src));
     }
 
     #[rstest]
@@ -693,11 +749,34 @@ mod tests {
         let suspect = Member::new_ipv4([0, 0, 0, 1], 9000);
         let suspect_entry = vigie.member_store.get_mut(suspect).unwrap();
         suspect_entry.status = MemberStatus::Suspect;
+        let suspected_at = 1000i64;
+        vigie.suspicion_timestamps.insert(suspect, suspected_at);
 
-        vigie.confirm_suspicion(0, suspect).unwrap();
+        vigie
+            .confirm_suspicion(suspected_at + vigie.suspicion_timeout, suspect)
+            .unwrap();
 
-        let suspect_entry = vigie.member_store.get(suspect).unwrap();
+        let suspect_entry = vigie.tombstone_store.get(&suspect).unwrap();
         assert_eq!(suspect_entry.status, MemberStatus::Confirm);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn test_confirm_suspicion_too_soon(
+        #[from(setup_member)] _member: Member,
+        #[from(setup_vigie)]
+        #[with(_member)]
+        mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
+    ) {
+        let suspect = Member::new_ipv4([0, 0, 0, 1], 9000);
+        let suspect_entry = vigie.member_store.get_mut(suspect).unwrap();
+        suspect_entry.status = MemberStatus::Suspect;
+        let suspected_at = 1000i64;
+        vigie.suspicion_timestamps.insert(suspect, suspected_at);
+
+        vigie
+            .confirm_suspicion(suspected_at + vigie.suspicion_timeout - 1, suspect)
+            .unwrap();
     }
 
     #[rstest]
@@ -727,7 +806,7 @@ mod tests {
         } = vigie.select_next_member();
 
         assert_ne!(member, _member);
-        assert_eq!(vigie.member_store.len(), 5);
+        assert_eq!(vigie.member_store.len(), 4);
     }
 
     #[rstest]
@@ -756,7 +835,7 @@ mod tests {
         } = vigie.select_next_member();
 
         assert_ne!(next_member, member);
-        assert_eq!(vigie.member_store.len(), 5);
+        assert_eq!(vigie.member_store.len(), 4);
         assert_eq!(member_set.len(), 4);
     }
 
@@ -768,11 +847,6 @@ mod tests {
         mut vigie: Vigie<BuiltinMemberStore, BuiltinEffectStore>,
     ) {
         vigie.member_store.clean();
-        vigie.member_store.insert(MembershipEntry {
-            member,
-            incarnation_counter: 0,
-            status: MemberStatus::Alive,
-        });
 
         let MembershipEntry {
             member: retrieved_member,
@@ -781,7 +855,7 @@ mod tests {
         } = vigie.select_next_member();
 
         assert_ne!(retrieved_member, member);
-        assert_eq!(vigie.member_store.len(), 5);
+        assert_eq!(vigie.member_store.len(), 4);
     }
 
     #[rstest]
@@ -800,7 +874,7 @@ mod tests {
             infection_number: 0,
         };
 
-        let current_member_entry = vigie.member_store.get(member).unwrap();
+        let current_incarnation = vigie.myself.incarnation_counter;
 
         vigie.defend_against_suspicion(&mut event);
 
@@ -819,10 +893,7 @@ mod tests {
 
         assert_eq!(*actual_member, member);
         assert_eq!(*status, MemberStatus::Alive);
-        assert_eq!(
-            *incarnation_counter,
-            current_member_entry.incarnation_counter + 1
-        );
+        assert_eq!(*incarnation_counter, current_incarnation + 1);
     }
 
     #[rstest]
@@ -1018,8 +1089,8 @@ mod property_tests {
                                                     })
                                                     .prop_map(|(events, indices)| {
                                                         let mut shuffled = events.clone();
-                                                        for i in 0..shuffled.len() {
-                                                            let j = indices[i].index(shuffled.len());
+                                                        for (i, idx) in indices.iter().enumerate().take(shuffled.len()) {
+                                                            let j = idx.index(shuffled.len());
                                                             shuffled.swap(i, j);
                                                         }
                                                         (events, shuffled)

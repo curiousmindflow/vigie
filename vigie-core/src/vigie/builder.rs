@@ -71,13 +71,20 @@ where
             timeout,
             suspicion_timeout,
         } = self;
+        let myself = MembershipEntry {
+            member: id,
+            incarnation_counter: 0,
+            status: MemberStatus::Alive,
+        };
         let mut vigie = Vigie {
             member_store,
             effect_store,
             dissemination_buffer: Default::default(),
+            tombstone_store: Default::default(),
             pending_ping_req: Default::default(),
+            suspicion_timestamps: Default::default(),
             seeds,
-            id,
+            myself,
             k,
             period,
             timeout,
@@ -91,16 +98,10 @@ where
     }
 
     pub(super) fn join(vigie: &mut Vigie<M, E>) -> Result<(), VigieError> {
-        let entry = MembershipEntry {
-            member: vigie.id,
-            incarnation_counter: 0,
-            status: MemberStatus::Alive,
-        };
-        vigie.member_store.insert(entry);
         vigie.dissemination_buffer.insert(
-            entry.member,
+            vigie.myself.member,
             MembershipEvent::new(
-                entry,
+                vigie.myself,
                 Vigie::<M, E>::compute_infection_count(vigie.member_store.len()),
             ),
         );
